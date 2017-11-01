@@ -1,3 +1,3 @@
-evo-comp
+Minetext
 ========
 Hi, this is a personal repository
