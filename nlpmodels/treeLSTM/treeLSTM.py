@@ -3,15 +3,16 @@ import torch.nn as nn
 import networkx as nx
 #
 #
-# Implementation of Sum-child (dependency) tree LST, per https://arxiv.org/pdf/1503.00075.pdf
+# Implementation of Sum-child (dependency) tree LST, per Kai Sheng Tai,Richard Socher,Christopher D. Manning, "Improved Semantic Representations From Tree-Structured Long Short-Term Memory Networks" https://arxiv.org/pdf/1503.00075.pdf
 #
-
+# Implements an attention mechanism when aggregating children vectors: Uses model 2 in Mahtab Ahmed, Muhammad Rifayat Samee, Robert E. Mercer  "Improving Tree-LSTM with self-attention"
+#
 
 class treeLSTM(nn.Module):
     #
     # input_dim is the final embedding dimension of the input vectors. If input_dim < actual vector dimension, we clip
     #
-    def __init__(self, input_dim, hidden_dim, dropout=0.0, num_layers=1, dtype=torch.float32, combination_mode="sum", input_pretransformed_dim=-1):
+    def __init__(self, input_dim, hidden_dim, dropout=0.0, num_layers=1, dtype=torch.float32, combination_mode="sum", attention=False):
         super(treeLSTM, self).__init__()
         #
         if hidden_dim < 1:
@@ -25,7 +26,7 @@ class treeLSTM(nn.Module):
         self.rand_factor = torch.sqrt(torch.tensor(
             1.0/self.hidden_dim, dtype=self.dtype))
         self.combination_mode = combination_mode
-
+        self.attention = attention
         #Initialization as Uniform(1/sqrt(hidden_dim),-1/sqrt(hidden_dim))
         self.W_i_0 = nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
                                                                   self.input_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
@@ -66,8 +67,18 @@ class treeLSTM(nn.Module):
                                                                 self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
         self.b_u = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers,
                                                                 self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
-    #
-
+    # Defining parameters for the attention. Attention only places in the last hidden states from children
+    # (for the multilayer case)
+        self.W_key=nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+        self.W_query=nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+        self.W_value=nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+        self.W_att=nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+        self.b_att = nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+    
     def _initialize_c(self, cell_initial=None):
         if cell_initial is None:
             return torch.zeros(self.hidden_dim, dtype=self.dtype)
@@ -82,7 +93,34 @@ class treeLSTM(nn.Module):
             return hidden_initial
         #return 2.0*self.rand_factor*torch.rand(self.hidden_dim, dtype=self.dtype)-self.rand_factor
     #
-    # Input x->[input_dim]
+    # hiddens_ -> All descendants of the node of interest [hidden_dim] - Not only children!
+    # query is either a [hidden_dim] tensor generated from a different sequence we want to compare 
+    # If None, we use as query_ the column-stacked children hidden vectors [hidden_dim, num_children]
+    # 
+    # 
+    def _attention(self, hiddens_, query_=None):
+        M_key=torch.stack(hiddens_,axis=1)
+        key=torch.mm(self.W_key,M_key) #[hidden_dim, #children]
+        if query_ is None:
+            M_query=torch.stack(hiddens_,axis=1)
+        else:
+            M_query = query_
+        if len(M_query.shape) == 2:
+            query=torch.mm(self.W_query,M_query) #[hidden_dim, #children] or [hidden_dim]
+            align=torch.mm(torch.transpose(query,0,1),key)*self.rand_factor #[#children, #children]
+            #Attention probability (for the word corresponding to row n, the different values in that row
+            #  are the attention that needs ot be given to each word in the subtree)
+            alpha=torch.nn.functional.softmax(align, dim=1) # 
+            h_pre_attentive=torch.sum(torch.mm(self.W_att, torch.mm(alpha, M_k),dim=0) # [hidden_dim]
+        elif len(M_query.shape) == 2:
+            query=self.W_query @ M_query
+            align = (query @ key).reshape(1,-1)*self.rand_factor #[1, #children]
+            alpha=torch.nn.functional.softmax(align, dim=1) # 
+            h_pre_attentive = self.W_att @ (alpha @ M_k) # [hidden_dim]
+        else:
+            raise ValueError("Attention query needs to be a vector or a matrixs")
+        h_attentive=nn.functional.tanh(h_pre_attentive + self.b_att)
+        return h_attentive
     # Initialized list of hidden and cell states (typically, from children)
     # Output: Updated Node hidden and cell state
     #
