@@ -31,9 +31,10 @@ class Vector2Classifier(nn.Module):
     # target_label_idx - list of class indices
     def forward(self, v_1, v_2, target_label_idx):
         batch_size = v_1.shape[0]
-        v_cross = v_1*v_2
-        v_plus = torch.abs(v_1-v_2)
-        v = torch.cat([v_cross, v_plus], axis=1)
+        #v_cross = v_1*v_2
+        #v_plus = torch.abs(v_1-v_2)
+        #v = torch.cat([v_cross, v_plus], axis=1)
+        v = torch.cat([v_1, v_2], axis=1)
         logprob = self.logprob_label(self.relu_layer(self.linear_layer(v)))
         pred_label_idx = [idx.item() for idx in torch.argmax(logprob, axis=1)]
         crossentropy = self.loss(logprob, torch.tensor(target_label_idx))
