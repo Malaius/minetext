@@ -15,7 +15,7 @@ def _batch_list(list_, batch_size):
         j += batch_size
     return out
 
-with open(r"C:\Users\unhel\OneDrive\source\repos\treeLSTM\SICK_dataset.pickle",mode="br") as inmodel:
+with open(r"SICK_dataset.pickle",mode="br") as inmodel:
     ds=pickle.load(inmodel)
 #Manual batching: DataLoader does not work with networkx objeccts
 data_size=len(ds)
