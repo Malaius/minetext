@@ -3,15 +3,16 @@ import torch.nn as nn
 import networkx as nx
 #
 #
-# Implementation of Sum-child (dependency) tree LST, per https://arxiv.org/pdf/1503.00075.pdf
+# Implementation of Sum-child (dependency) tree LST, per Kai Sheng Tai,Richard Socher,Christopher D. Manning, "Improved Semantic Representations From Tree-Structured Long Short-Term Memory Networks" https://arxiv.org/pdf/1503.00075.pdf
 #
-
+# Implements an attention mechanism when aggregating children vectors: Uses model 2 in Mahtab Ahmed, Muhammad Rifayat Samee, Robert E. Mercer  "Improving Tree-LSTM with self-attention"
+#
 
 class treeLSTM(nn.Module):
     #
     # input_dim is the final embedding dimension of the input vectors. If input_dim < actual vector dimension, we clip
     #
-    def __init__(self, input_dim, hidden_dim, dropout=0.0, num_layers=1, dtype=torch.float32, combination_mode="sum", input_pretransformed_dim=-1):
+    def __init__(self, input_dim, hidden_dim,attention_dim,dropout=0.0, num_layers=1, dtype=torch.float32, attention=False, generate_query=False):
         super(treeLSTM, self).__init__()
         #
         if hidden_dim < 1:
@@ -19,90 +20,151 @@ class treeLSTM(nn.Module):
         #
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
+        self.attention_dim=attention_dim
         self.dropout = dropout
         self.num_layers = num_layers
         self.dtype = dtype
         self.rand_factor = torch.sqrt(torch.tensor(
-            1.0/self.hidden_dim, dtype=self.dtype))
-        self.combination_mode = combination_mode
-
+            1.0/self.hidden_dim, dtype=self.dtype, requires_grad=False))
+        self.attention = attention
+        self.generate_query=generate_query
         #Initialization as Uniform(1/sqrt(hidden_dim),-1/sqrt(hidden_dim))
         self.W_i_0 = nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
-                                                                  self.input_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                  self.input_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.hidden_dim,
+                                                                  self.input_dim, dtype=self.dtype), requires_grad=True)
         if self.num_layers > 1:
             self.W_i = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers-1, self.hidden_dim,
-                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers-1, self.hidden_dim,
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
         self.U_i = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers, self.hidden_dim,
-                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers, self.hidden_dim,
+                                                                self.hidden_dim, dtype=self.dtype), requires_grad=True)
         self.b_i = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers,
-                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers,
+                                                                self.hidden_dim, dtype=self.dtype), requires_grad=True)
 
         self.W_f_0 = nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
-                                                                  self.input_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                  self.input_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.hidden_dim,
+                                                                  self.input_dim, dtype=self.dtype), requires_grad=True)
         if self.num_layers > 1:
             self.W_f = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers-1, self.hidden_dim,
-                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers-1, self.hidden_dim,
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
         self.U_f = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers, self.hidden_dim,
-                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers, self.hidden_dim,
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
         self.b_f = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers,
-                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers, 
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
 
         self.W_o_0 = nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
-                                                                  self.input_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                  self.input_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.hidden_dim,
+                                                                  self.input_dim, dtype=self.dtype), requires_grad=True)
         if self.num_layers > 1:
             self.W_o = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers-1, self.hidden_dim,
-                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers-1, self.hidden_dim,
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
         self.U_o = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers, self.hidden_dim,
-                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers, self.hidden_dim,
+                                                                self.hidden_dim, dtype=self.dtype), requires_grad=True)
         self.b_o = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers,
-                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers,
+                                                                self.hidden_dim, dtype=self.dtype), requires_grad=True)
 
         self.W_u_0 = nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
-                                                                  self.input_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                  self.input_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.hidden_dim,
+                                                                  self.input_dim, dtype=self.dtype), requires_grad=True)
         if self.num_layers > 1:
             self.W_u = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers-1, self.hidden_dim,
-                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers-1, self.hidden_dim,
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
         self.U_u = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers, self.hidden_dim,
-                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers, self.hidden_dim,
+                                                                self.hidden_dim, dtype=self.dtype), requires_grad=True)
         self.b_u = nn.Parameter(2.0*self.rand_factor*torch.rand(self.num_layers,
-                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor, requires_grad=True)
-    #
-
-    def _initialize_c(self, cell_initial=None):
-        if cell_initial is None:
-            return torch.zeros(self.hidden_dim, dtype=self.dtype)
-        else:
-            return cell_initial
+                                                                self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.num_layers,
+                                                                self.hidden_dim, dtype=self.dtype), requires_grad=True)
+    # Defining parameters for the attention. Attention only places in the last hidden states from children
+    # (for the multilayer case)
+        if self.attention:
+            self.W_key=nn.Parameter(2.0*self.rand_factor*torch.rand(self.attention_dim,
+                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.attention_dim,
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
+            self.W_query=nn.Parameter(2.0*self.rand_factor*torch.rand(self.attention_dim,
+                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.attention_dim,
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
+            #self.W_value=nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
+            #                                                        self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.hidden_dim,
+            #                                                        self.hidden_dim, dtype=self.dtype), requires_grad=True)
+            self.W_att=nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim,
+                                                                    self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.hidden_dim,
+                                                                    self.hidden_dim, dtype=self.dtype), requires_grad=True)
+            self.b_att = nn.Parameter(2.0*self.rand_factor*torch.rand(self.hidden_dim, dtype=self.dtype)-self.rand_factor*torch.ones(self.hidden_dim, dtype=self.dtype), requires_grad=True)
+            
+        if self.generate_query:
+            self.build_query=nn.LSTM(self.input_dim,self.hidden_dim,self.num_layers,bias=True,batch_first=True, dropout=self.dropout, bidirectional=False)
+        
+    def _initialize_c(self):
+        return torch.zeros(self.hidden_dim, dtype=self.dtype)
         #return 2.0*self.rand_factor*torch.rand(self.hidden_dim, dtype=self.dtype)-self.rand_factor
 
-    def _initialize_h(self, hidden_initial=None):
-        if hidden_initial is None:
-            return torch.zeros(self.hidden_dim, dtype=self.dtype)
-        else:
-            return hidden_initial
+    def _initialize_h(self):
+        return torch.zeros(self.hidden_dim, dtype=self.dtype)
         #return 2.0*self.rand_factor*torch.rand(self.hidden_dim, dtype=self.dtype)-self.rand_factor
     #
-    # Input x->[input_dim]
+    # hiddens_ -> All descendants of the node of interest [hidden_dim] - Not only children!
+    # query is either a [hidden_dim] tensor generated from a different sequence we want to compare 
+    # If None, we use as query_ the column-stacked children hidden vectors [hidden_dim, num_children]
+    # 
+    # 
+    def _attention(self, hiddens_, query_=None):
+        M_key=torch.stack(hiddens_,axis=1)
+        if query_ is None:
+            M_query=torch.stack(hiddens_,axis=1)
+        else:
+            M_query = query_
+        if len(M_query.shape) == 2:
+            query=torch.mm(self.W_query, M_query)
+            key=torch.mm(self.W_key, M_key)
+            align=torch.mm(torch.transpose(query,0,1),key)*self.rand_factor
+            #
+            # Each row (dim=0) is the attention probability for every children according to the owrd in that row
+            # Normalize on columns
+            alpha=torch.nn.functional.softmax(align, dim=0) #
+            pre_h=torch.mm(M_key,alpha) #Weighted sum for every children [hidden, #children]
+            h_attentive=torch.sum(torch.tanh(torch.mm(self.W_att,pre_h)+ torch.stack([self.b_att for i in range(pre_h.shape[1])],axis=1)),dim=1)
+        elif len(M_query.shape) == 1:
+            query=torch.mv(self.W_query, M_query)
+            key=torch.mm(self.W_key, M_key)
+            align=torch.mv(torch.transpose(key,0,1),query)*self.rand_factor
+            #
+            # Each row (dim=0) is the attention probability for every children according to the owrd in that row
+            # Normalize on columns
+            alpha=torch.nn.functional.softmax(align, dim=0) #
+            pre_h=torch.mv(M_key,alpha) #Expected value of the attention given to every child
+            h_attentive=torch.tanh(torch.mv(self.W_att,pre_h) + self.b_att)
+        else:
+            raise ValueError("Attention query needs to be a vector or a matrixs")
+        return h_attentive
     # Initialized list of hidden and cell states (typically, from children)
     # Output: Updated Node hidden and cell state
     #
     # hiddens_ list of hidden vectors from children node
+    # all_hiddens -> List of hidden vectors from all descendants
     #
-
-    def _combine_children_hidden(self, hiddens_, children_x_, children_idx_):
-        if self.combination_mode == "sum":
-            return torch.sum(torch.stack([h_ for h_ in hiddens_], axis=0), axis=0)
-        else:  # Placeholder for future children combination modes
+    def _combine_children_hidden(self, hiddens_, all_hiddens_, query=None):
+        if self.attention:
+            return self._attention(all_hiddens_, query)
+        else:  # Standard child-sum combination fr dependency-based treeLSTM
             return torch.sum(torch.stack([h_ for h_ in hiddens_], axis=0), axis=0)
 
     #
-    def _cell_forward(self, x_, hiddens_0, cells_0, children_x_, children_idx_):
-        x = x_[0:self.input_dim]  # Clipping by default
+    def _cell_forward(self, x_, hiddens_0, cells_0, all_hiddens_0, query=None):
+        x = x_[0:self.input_dim]  # Clipping by default. Moved to forward
         #Summing the children contribution
         hiddens_ = hiddens_0
         cells_ = cells_0
-        h_sum = self._combine_children_hidden(
-            hiddens_, children_x_, children_idx_)
+        h_sum = self._combine_children_hidden(hiddens_, all_hiddens_0, query)
         #h_sum=torch.sum(torch.stack([h_ for h_ in hiddens_],axis=0),axis=0)
         #c_sum=torch.sum(torch.stack([c_ for c_ in cells_],axis=0),axis=0)
         #Node input gate
@@ -164,34 +226,48 @@ class treeLSTM(nn.Module):
     # Calculates hidden, output and cell states for a batch of dependency trees
     # A tree is an instance of nx.DiGraph, with a "vector" property to store  the word embedding
     # The relationship goes from parent to child
-    # hiddens
+    # 
     #
+    def generate_batch_query(self,trees):
+        # We do not batch the execution. A hit in performance, but this is just an initial version
+        query_batch_=[]
+        for tree in trees:
+            #Node ID is the position in the sentence
+            x_=torch.stack([v[1] for v in sorted([(n, tree.nodes[n]["dict"]["vector"][0:self.input_dim]) for n in tree], key=lambda p: p[0])],dim=0)
+            x=x_.reshape(1,x_.shape[0], x_.shape[1])
+            h_0_=self._initialize_h()
+            h_0=h_0_.reshape(1,1,h_0_.shape[0])
+            c_0_=self._initialize_c()
+            c_0=c_0_.reshape(1,1,c_0_.shape[0])
+            _,(h_n,_) = self.build_query(x,(h_0,c_0))
+            query_batch_.append(h_n.reshape(h_0_.shape[0]))
+        return torch.stack(query_batch_,dim=0) #[batch_size, hidden_size]
 
-    def forward(self, trees, hiddens_initial=None, cells_initial=None):
+    def forward(self, trees, query=None):
         #
         # Always initialize the first hidden and cell state vectors (zero)
         #
         root_hidden = []
         root_cell = []
         for tree_idx, tree in enumerate(trees):
+            #
+            # Droput mask vectors. We will apply the same mask during all steps for a single tree
+            # (trying to follow the tied weights method described in Yarin Gal, Zoubin Ghahramani "A Theoretically Grounded Application of Dropout in Recurrent Neural Network")
+            #
+            z_x=torch.bernoulli((1.0 -self.dropout)*torch.ones(self.input_dim))
+            z_h=torch.bernoulli((1.0 -self.dropout)*torch.ones(self.hidden_dim))
             #Initialize on leaves
             children = [n for n in tree if tree.out_degree(
                 n) == 0 and tree.in_degree(n) > 0]
             processed_nodes = set()
             for sc in children:  # Apply cell update on leaves
-                if hiddens_initial is None:
-                    h_0 = self._initialize_h()
-                else:
-                    h_0 = self._initialize_h(hiddens_initial[tree_idx, :])
-                if cells_initial is None:
-                    c_0 = self._initialize_c(None)
-                else:
-                    c_0 = self._initialize_c(cells_initial[tree_idx, :])
-                h, c = self._cell_forward(tree.nodes[sc]["dict"]["vector"],
-                                          [h_0],
+                h_0 = self._initialize_h()
+                c_0 = self._initialize_c()
+                h, c = self._cell_forward(z_x*tree.nodes[sc]["dict"]["vector"][0:self.input_dim],
+                                          [z_h*h_0],
                                           [c_0],
-                                          [],
-                                          children)
+                                          [z_h*h_0],
+                                          None if query is None else query[tree_idx,:])
                 tree.nodes[sc]["dict"]["h"] = h
                 tree.nodes[sc]["dict"]["c"] = c
                 processed_nodes.add(sc)
@@ -208,14 +284,13 @@ class treeLSTM(nn.Module):
                             parents.append(n)
                             children_local.append(schildren_local)
                 for p, c_local in zip(parents, children_local):
-                    h, c = self._cell_forward(tree.nodes[p]["dict"]["vector"],
-                                              [tree.nodes[c_]["dict"]["h"]
+                    h, c = self._cell_forward(z_x*tree.nodes[p]["dict"]["vector"][0:self.input_dim],
+                                              [z_h*tree.nodes[c_]["dict"]["h"]
                                                   for c_ in c_local],
                                               [tree.nodes[c_]["dict"]["c"]
                                                   for c_ in c_local],
-                                              [tree.nodes[c_]["dict"]["vector"]
-                                                  for c_ in c_local],
-                                              c_local)
+                                               [z_h*tree.nodes[c_]["dict"]["h"] for c_ in nx.descendants(tree,p)],
+                                               None if query is None else query[tree_idx,:])
                     tree.nodes[p]["dict"]["h"] = h
                     tree.nodes[p]["dict"]["c"] = c
                     processed_nodes.add(p)
